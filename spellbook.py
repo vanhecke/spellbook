@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -20,19 +21,22 @@ from pathlib import Path
 import click
 
 from spellbook import __version__
+from spellbook.agentix import AgentixPack, MarketplaceConflict, plan_upload
+from spellbook.content_importer import CorrelationImporter
+from spellbook.instance import InstanceManager
+from spellbook.knowledge import AgentNotInstalled, KnowledgeCenter, KnowledgeError
+from spellbook.modeling_importer import ModelingRuleImporter
 from spellbook.pack_builder import PackBuilder, EXCLUDED_PACKS
 from spellbook.pack_template import PackTemplate
-from spellbook.version_manager import VersionManager
-from spellbook.instance import InstanceManager
-from spellbook.xsiam_validator import XSIAMValidator, check_modeling_schemas
-from spellbook.content_importer import CorrelationImporter
-from spellbook.modeling_importer import ModelingRuleImporter
 from spellbook.parsing_importer import ParsingRuleImporter
 from spellbook.python_lint import run_ruff_format
 from spellbook.template_renderer import (
     TemplateRenderer,
     list_templates,
 )
+from spellbook.tenant import MissingCredentials, TenantCredentials
+from spellbook.version_manager import VersionManager
+from spellbook.xsiam_validator import XSIAMValidator, check_modeling_schemas
 
 
 TASK_UUID_PATTERN = re.compile(r"^TASK_UUID_\d+$")
@@ -1100,6 +1104,160 @@ def rename_content(pack_name, config):
     sys.exit(0)
 
 
+def _echo_marketplace_conflict(exc: MarketplaceConflict) -> None:
+    click.echo("[ERROR] Pack carries Agentix content, which only the Platform")
+    click.echo("        marketplace ships. The requested marketplace would upload")
+    click.echo("        successfully and install a pack with no agent in it.")
+    click.echo("")
+    click.echo("        Agentix items that would be dropped:")
+    for item in exc.dropped[:12]:
+        click.echo(f"          {item}")
+    remaining = len(exc.dropped) - 12
+    if remaining > 0:
+        click.echo(f"          ... and {remaining} more")
+    click.echo("")
+    click.echo("        Drop the flag: spellbook upload <Pack>")
+
+
+def _upload_agentix_pack(
+    pack: AgentixPack,
+    *,
+    pack_name: str,
+    xsiam: bool,
+    insecure: bool,
+    skip_validation: bool,
+    dry_run: bool,
+) -> None:
+    """Install an Agentix pack on Platform and push Collection knowledge files."""
+    try:
+        plan = plan_upload(
+            pack,
+            xsiam=xsiam,
+            insecure=insecure,
+            skip_validation=skip_validation,
+        )
+    except MarketplaceConflict as exc:
+        _echo_marketplace_conflict(exc)
+        sys.exit(1)
+
+    if not pack.declares_platform:
+        click.echo(
+            f"[ERROR] {pack_name}: pack_metadata.json marketplaces must include "
+            "'platform' or demisto-sdk will drop Agentix items at dump time."
+        )
+        sys.exit(1)
+
+    click.echo(f"Spellbook v{__version__}")
+    click.echo("")
+    click.echo(plan.render())
+    click.echo("")
+    if dry_run:
+        click.echo("[OK] Dry run; tenant was not contacted")
+        return
+
+    try:
+        credentials = TenantCredentials.from_env()
+    except MissingCredentials as exc:
+        click.echo("[ERROR] Missing required environment variables for Agentix upload")
+        click.echo(f"        {exc}")
+        sys.exit(1)
+
+    content_root = pack.path.parent.parent.resolve()
+    git_dir = content_root / ".git"
+    git_initialised = False
+    if not git_dir.exists():
+        click.echo("Setting up temporary git repository for upload...")
+        try:
+            subprocess.run(
+                ["git", "init"],
+                cwd=str(content_root),
+                capture_output=True,
+                check=True,
+            )
+            git_initialised = True
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=str(content_root),
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c", "user.name=Spellbook",
+                    "-c", "user.email=spellbook@localhost",
+                    "commit",
+                    "-m", "Temporary commit for upload",
+                    "--allow-empty",
+                ],
+                cwd=str(content_root),
+                capture_output=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            click.echo(f"[WARN] Could not initialise git repository: {exc}")
+
+    if not skip_validation:
+        run_xsiam_validation(pack.path.parent, pack_name)
+
+    click.echo(f"Uploading {pack_name}...")
+    click.echo(f"Target: {credentials.base_url}")
+    env = os.environ.copy()
+    env["CONTENT_PATH"] = str(content_root)
+    env["DEMISTO_SDK_CONTENT_PATH"] = str(content_root)
+    env["DEMISTO_BASE_URL"] = credentials.base_url
+    env["DEMISTO_API_KEY"] = credentials.api_key
+    env["XSIAM_AUTH_ID"] = credentials.auth_id
+
+    try:
+        result = subprocess.run(
+            list(plan.sdk_argv),
+            check=False,
+            env=env,
+            cwd=str(content_root),
+        )
+        if result.returncode != 0:
+            click.echo("[FAIL] Upload failed")
+            sys.exit(result.returncode)
+        click.echo("[OK] Pack installed")
+    except FileNotFoundError:
+        click.echo("[ERROR] demisto-sdk not found")
+        click.echo("Install it with: pip install demisto-sdk")
+        sys.exit(1)
+    finally:
+        if git_initialised:
+            try:
+                shutil.rmtree(git_dir)
+            except Exception as exc:
+                click.echo(f"[WARN] Failed to clean temporary git dir: {exc}")
+
+    if not plan.documents:
+        click.echo("[OK] Upload completed")
+        return
+
+    click.echo("")
+    click.echo(f"Pushing {len(plan.documents)} knowledge document(s)...")
+    try:
+        results = KnowledgeCenter(credentials, insecure=insecure).sync(plan.documents)
+    except AgentNotInstalled as exc:
+        click.echo(f"[FAIL] pack installed, knowledge not pushed: {exc}")
+        click.echo(f"        Resume with: spellbook upload {pack_name}")
+        sys.exit(1)
+    except KnowledgeError as exc:
+        click.echo(f"[FAIL] pack installed, knowledge not pushed: {exc}")
+        click.echo(f"        Resume with: spellbook upload {pack_name}")
+        sys.exit(1)
+
+    for item in results:
+        size = "" if item.size_bytes is None else f" ({item.size_bytes} bytes)"
+        click.echo(f'[OK] "{item.source_name}" ready{size}')
+        if item.bound_agents:
+            click.echo(
+                f"[OK] {', '.join(item.bound_agents)} lists the source"
+            )
+    click.echo("[OK] Upload completed")
+
+
 @cli.command()
 @click.argument("pack_path", metavar="PACK")
 @click.option(
@@ -1141,17 +1299,37 @@ def rename_content(pack_name, config):
     default="spellbook.yaml",
     help="Path to configuration file."
 )
-def upload(pack_path, platform, xsiam, insecure, skip_validation, strict_marketplace, config):
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the upload plan and exit without contacting the tenant."
+)
+def upload(
+    pack_path,
+    platform,
+    xsiam,
+    insecure,
+    skip_validation,
+    strict_marketplace,
+    config,
+    dry_run,
+):
     """Upload a content pack to Cortex Platform.
 
     PACK is a pack name (e.g., MyPack), as every other command takes, or a
     path to the pack directory (e.g., Packs/MyPack). Both work.
 
+    A pack carrying Agentix content is uploaded to the Platform marketplace,
+    replaces the installed copy, and has Collection sibling documents pushed
+    to the Knowledge Center. No extra flag selects this; it follows from the
+    pack. Detection packs keep today's marketplace flags.
+
     Required environment variables:
       DEMISTO_BASE_URL - Your instance URL
       DEMISTO_API_KEY  - API key with Instance Administrator role
 
-    For Cortex Platform or XSIAM, also set:
+    For Cortex Platform, XSIAM, or Agentix packs, also set:
       XSIAM_AUTH_ID    - Authentication ID from your instance
     """
     if xsiam and platform:
@@ -1249,6 +1427,19 @@ def upload(pack_path, platform, xsiam, insecure, skip_validation, strict_marketp
         click.echo("")
         click.echo("Usage: upload Packs/MyPack --platform")
         sys.exit(1)
+
+    agentix_pack = AgentixPack.probe(input_file)
+    if agentix_pack.detected:
+        _upload_agentix_pack(
+            agentix_pack,
+            pack_name=pack_name,
+            xsiam=xsiam,
+            insecure=insecure,
+            skip_validation=skip_validation,
+            dry_run=dry_run,
+        )
+        return
+
     mismatched = builder.check_content_naming(pack_name)
     if mismatched:
         click.echo(f"[WARN] Content naming mismatch: {pack_name} has items with different names")
@@ -1391,7 +1582,6 @@ def upload(pack_path, platform, xsiam, insecure, skip_validation, strict_marketp
     finally:
         if git_initialised:
             try:
-                import shutil
                 shutil.rmtree(git_dir)
             except Exception as e:
                 click.echo(f"[WARN] Failed to clean temporary git dir: {e}")

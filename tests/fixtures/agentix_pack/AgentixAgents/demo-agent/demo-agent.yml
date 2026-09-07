@@ -1,0 +1,4 @@
+commonfields:
+  id: demo-agent
+  version: -1
+name: demo-agent

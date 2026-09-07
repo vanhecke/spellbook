@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: GoCortexIO
+#
+# demisto-sdk validation profile for standalone Agentix packs.
+# Pinned to demisto-sdk 1.39.5 (pyproject.toml). Update together.
+#
+# The SDK default_config.toml selects 15 codes and no AG/GR rule, so an
+# unconfigured `validate` never checks agents, actions, skills, or collections.
+# sdk_validation_config.toml does select AG rules but assumes a checkout of
+# demisto/content (PA102 remote fetches) and aborts on a standalone pack.
+#
+# Not selected, each for a reason that is not taste:
+#   AG100  forbids Agentix in the public content repo; Spellbook packs are not in it
+#   AG102  category checked against approved_categories.json, fetched remotely
+#   AG112  action/skill character budgets; generated skill bodies can exceed them
+#   AG116  needs the content graph, which upload does not build
+#   AG118  requires <ActionId>_test.yml; lands in 1.39.6, absent from this pin
+#   GR1xx  every graph validator — same reason as AG116
+#   DO104  listed ignorable: isllm prompt scripts have no dockerimage; the SDK
+#          falls back to demisto/python2 and the run dies on Docker Hub 401
+
+ignorable_errors = [
+  "AG112",
+  "DO104",
+  "AG117",
+  "BA101",
+  "BA105",
+  "BA106",
+  "BA116",
+  "BA118",
+  "IN108",
+  "IN130",
+  "PA107",
+  "PA108",
+  "PA111",
+  "PA115",
+  "PA128",
+  "PA130",
+  "RP101"
+]
+
+[Custom_Categories]
+select = []
+warning = []
+
+[path_based_validations]
+select = [
+  "AG101",
+  "AG103",
+  "AG104",
+  "AG105",
+  "AG106",
+  "AG107",
+  "AG108",
+  "AG109",
+  "AG110",
+  "AG111",
+  "AG114",
+  "AG115",
+  "AG117",
+  "BA101",
+  "BA105",
+  "BA106",
+  "BA116",
+  "BA118",
+  "IN108",
+  "IN130",
+  "PA107",
+  "PA108",
+  "PA111",
+  "PA115",
+  "PA128",
+  "PA130",
+  "RP101"
+]
+warning = []
+
+[use_git]
+select = [
+  "AG101",
+  "AG103",
+  "AG104",
+  "AG105",
+  "AG106",
+  "AG107",
+  "AG108",
+  "AG109",
+  "AG110",
+  "AG111",
+  "AG114",
+  "AG115",
+  "AG117",
+  "BA101",
+  "BA105",
+  "BA106",
+  "BA116",
+  "BA118",
+  "IN108",
+  "IN130",
+  "PA107",
+  "PA108",
+  "PA111",
+  "PA115",
+  "PA128",
+  "PA130",
+  "RP101"
+]
+warning = []
+
+[support_level]

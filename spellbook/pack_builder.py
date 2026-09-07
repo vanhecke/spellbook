@@ -16,6 +16,7 @@ from pathlib import Path
 import click
 import yaml
 
+from .agentix import AgentixPack, bundled_validation_config
 from .pack_tests import run_pack_tests
 from .python_lint import run_ruff_check
 from .version_manager import VersionManager
@@ -286,6 +287,8 @@ class PackBuilder:
             "demisto-sdk", "validate",
             "-i", str(pack_path.relative_to(content_root)),
         ]
+        if AgentixPack.probe(pack_path).detected:
+            cmd.extend(["--config-path", str(bundled_validation_config())])
 
         skip_checks = validation_config.get("skip_checks", [])
         for check in skip_checks:

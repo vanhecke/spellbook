@@ -1,0 +1,14 @@
+{
+  "name": "AgentixFixture",
+  "description": "Minimal Agentix pack for Spellbook unit tests.",
+  "support": "community",
+  "currentVersion": "1.0.0",
+  "author": "Spellbook Tests",
+  "url": "",
+  "email": "",
+  "categories": ["Analytics & SIEM"],
+  "tags": [],
+  "useCases": [],
+  "keywords": [],
+  "marketplaces": ["platform"]
+}
