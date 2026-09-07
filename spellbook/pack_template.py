@@ -687,6 +687,376 @@ alter
             json.dump(report_data, f, indent=2)
             f.write("\n")
 
+    def create_agentix_content(self, pack_path: Path, pack_name: str) -> None:
+        """Write SamplePack Agentix starter items.
+
+        Called only from instance init. `create` does not scaffold empty
+        Agentix directories: AG110 requires a `_systeminstructions.md`
+        sidecar whose name uses an underscore, and empty Agentix folders
+        on every detection pack would trip filename checks.
+        """
+        self._create_sample_agent(pack_path)
+        self._create_sample_score_script(pack_path)
+        self._create_sample_score_action(pack_path)
+        self._create_sample_skill(pack_path)
+        self._create_sample_collection(pack_path)
+        self._append_agentix_readme(pack_path)
+        self._append_agentix_release_notes(pack_path, pack_name)
+
+    def _write_text(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def _create_sample_agent(self, pack_path: Path) -> None:
+        agent_id = "sample-analyst-agent"
+        item_dir = pack_path / "AgentixAgents" / agent_id
+        self._write_text(
+            item_dir / f"{agent_id}.yml",
+            f"""commonfields:
+  id: {agent_id}
+  version: -1
+display: Sample Analyst
+name: Sample Analyst
+tags:
+  - example
+category: Utilities
+description: >-
+  Starter Agentix agent. Score one alert with Sample Score, then read the
+  sample collection before you escalate. Replace these items with a real
+  agent, or reshape them after init.
+color: "#4C6FFF"
+visibility: public
+systeminstructions: ""
+conversationstarters:
+  - "Score this sample alert: deny, src 203.0.113.10, dst port 3389"
+actionids:
+  - SampleScoreAction
+builtinactions:
+  - InvokeLLM
+skillids:
+  - sample-analyst-skill
+collectionids:
+  - SampleWorkedAlertsCollection
+autoenablenewactions: false
+roles:
+  - Analyst
+sharedwithroles:
+  - Analyst
+marketplaces:
+  - platform
+supportedModules:
+  - agentix
+""",
+        )
+        self._write_text(
+            item_dir / f"{agent_id}_systeminstructions.md",
+            """You are the Sample Analyst. Score the alert first, then consult the
+sample collection before you escalate.
+
+Follow the Sample Analyst skill. Run Sample Score before you form an
+opinion. The collection carries estate facts that can override a high
+score.
+
+Close with one verdict, the evidence it rests on, and nothing else.
+""",
+        )
+
+    def _create_sample_score_script(self, pack_path: Path) -> None:
+        gitkeep = pack_path / "Scripts" / ".gitkeep"
+        if gitkeep.exists():
+            gitkeep.unlink()
+        script_dir = pack_path / "Scripts" / "SampleScoreScript"
+        self._write_text(
+            script_dir / "SampleScoreScript.yml",
+            """commonfields:
+  id: SampleScoreScript
+  version: -1
+name: SampleScoreScript
+comment: >-
+  Deterministic 0-100 score for a single sample alert. Backs Sample Score.
+script: ''
+type: python
+subtype: python3
+dockerimage: demisto/python3:3.9.8.24399
+args:
+  - name: alert
+    description: One alert as a JSON object (action, src_ip, dst_port).
+    required: true
+outputs:
+  - contextPath: SampleAlert.Score.score
+    description: Risk score from 0 to 100.
+    type: Number
+  - contextPath: SampleAlert.Score.band
+    description: informational, low, medium or high.
+    type: String
+fromversion: 8.14.0
+tags: []
+marketplaces:
+  - platform
+""",
+        )
+        self._write_text(
+            script_dir / "SampleScoreScript.py",
+            '''"""Sample Score Script - starter scoring for the Sample Analyst agent."""
+
+import demistomock as demisto  # noqa: F401
+from CommonServerPython import *  # noqa: F401,F403
+
+import json
+
+ADMIN_PORTS = {22, 23, 445, 3389, 5900}
+
+
+def score_alert(alert):
+    reasons = []
+    score = 0
+    action = str(alert.get("action", "")).lower()
+    if action in ("deny", "drop", "reset"):
+        score += 40
+        reasons.append("action=%s (+40)" % action)
+    try:
+        port = int(alert.get("dst_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port in ADMIN_PORTS:
+        score += 40
+        reasons.append("destination port %d is an admin service (+40)" % port)
+    score = min(score, 100)
+    if score >= 70:
+        band = "high"
+    elif score >= 40:
+        band = "medium"
+    elif score > 0:
+        band = "low"
+    else:
+        band = "informational"
+        reasons.append("no scoring signal present in the alert")
+    return score, band, reasons
+
+
+def main():
+    raw = demisto.args().get("alert") or "{}"
+    try:
+        alert = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as exc:
+        return_error("alert is not valid JSON: %s" % exc)
+        return
+    if not isinstance(alert, dict):
+        return_error("alert must be a JSON object describing ONE alert")
+        return
+    score, band, reasons = score_alert(alert)
+    return_results(
+        CommandResults(
+            outputs_prefix="SampleAlert.Score",
+            outputs={"score": score, "band": band, "reasons": reasons},
+            readable_output="### Sample alert score\\n**%d / 100 (%s)**" % (score, band),
+        )
+    )
+
+
+if __name__ in ("__main__", "__builtin__", "builtins"):
+    main()
+''',
+        )
+
+    def _create_sample_score_action(self, pack_path: Path) -> None:
+        action_id = "SampleScoreAction"
+        item_dir = pack_path / "AgentixActions" / action_id
+        self._write_text(
+            item_dir / f"{action_id}.yml",
+            """commonfields:
+  id: SampleScoreAction
+  version: -1
+display: Sample Score
+name: SampleScoreAction
+tags:
+  - example
+category: Utilities
+description: >-
+  Score one sample alert 0-100 and band it informational / low / medium / high.
+args:
+  - name: alert
+    description: One alert as JSON (action, src_ip, dst_port).
+    type: string
+    required: true
+    isgeneratable: true
+    underlyingargname: alert
+outputs:
+  - name: score
+    description: Risk score from 0 to 100.
+    type: number
+    underlyingoutputcontextpath: SampleAlert.Score.score
+  - name: band
+    description: informational, low, medium or high.
+    type: string
+    underlyingoutputcontextpath: SampleAlert.Score.band
+underlyingcontentitem:
+  id: SampleScoreScript
+  name: SampleScoreScript
+  type: script
+  version: -1
+requiresuserapproval: false
+fewshots:
+  - >-
+    Score a denied inbound hit: alert="{\\"action\\":\\"deny\\",\\"src_ip\\":\\"203.0.113.10\\",
+    \\"dst_port\\":3389}". Returns high.
+marketplaces:
+  - platform
+supportedModules:
+  - agentix
+""",
+        )
+        self._write_text(
+            item_dir / f"{action_id}_test.yml",
+            """tests:
+  - name: scores a denied inbound RDP hit as high
+    prompt: >-
+      Score this alert: deny, src 203.0.113.10, dst port 3389.
+    agent_id: sample-analyst-agent
+    expected_outcomes:
+      - evaluation_mode: any_of
+        actions:
+          - action_name: SampleScoreAction
+        expected_output: high
+fixtures: []
+""",
+        )
+
+    def _create_sample_skill(self, pack_path: Path) -> None:
+        skill_id = "sample-analyst-skill"
+        item_dir = pack_path / "AgentixSkills" / skill_id
+        self._write_text(
+            item_dir / f"{skill_id}.yml",
+            f"""commonfields:
+  id: {skill_id}
+  version: -1
+name: Sample Analyst
+description: >-
+  Starter triage procedure: score the alert, then consult the sample collection.
+content: ""
+fromversion: 8.15.0
+tags:
+  - example
+internal: false
+disabled: false
+marketplaces:
+  - platform
+supportedModules:
+  - agentix
+""",
+        )
+        self._write_text(
+            item_dir / f"{skill_id}_skill.md",
+            """# Sample analyst procedure
+
+Work one alert at a time.
+
+## 1. Score before you judge
+
+Run <action=SampleScoreAction> on the alert first. A score of 0 banding
+informational is a result - report it and stop.
+
+## 2. Check the sample collection
+
+Read the Sample Worked Alerts collection before you escalate. Known-benign
+sources override a high score.
+
+## 3. Close once
+
+State the verdict, the score, and the evidence. Do not recommend containment.
+""",
+        )
+
+    def _create_sample_collection(self, pack_path: Path) -> None:
+        collection_id = "SampleWorkedAlertsCollection"
+        item_dir = pack_path / "Collections" / collection_id
+        self._write_text(
+            item_dir / f"{collection_id}.yml",
+            f"""commonfields:
+  id: {collection_id}
+  version: -1
+name: Sample Worked Alerts
+description: >-
+  Starter collection handle. The sibling markdown is not pack content;
+  spellbook upload pushes it to the Knowledge Center after install.
+fromversion: 8.15.0
+marketplaces:
+  - platform
+supportedModules:
+  - agentix
+""",
+        )
+        self._write_text(
+            item_dir / "SampleWorkedAlerts.md",
+            """# Sample worked alerts
+
+Estate facts for the Sample Analyst. Replace this file with real knowledge.
+
+- 203.0.113.0/24 is the documentation range. Hits from it are usually tests.
+- Escalation code for a confirmed malicious admin-port hit: FW-SAMPLE-1.
+""",
+        )
+
+    def _append_agentix_readme(self, pack_path: Path) -> None:
+        readme_path = pack_path / "README.md"
+        if not readme_path.is_file():
+            return
+        text = readme_path.read_text(encoding="utf-8")
+        marker = "### Integrations"
+        section = """### Agents
+
+Starter Agentix agent (`sample-analyst-agent`) with system instructions.
+
+### Actions
+
+`SampleScoreAction`, backed by `SampleScoreScript`.
+
+### Skills
+
+`sample-analyst-skill`, the procedure the sample agent follows.
+
+### Collections
+
+`SampleWorkedAlertsCollection`. Sibling markdown is pushed as knowledge on upload.
+
+### Integrations"""
+        if marker in text:
+            text = text.replace(marker, section, 1)
+            readme_path.write_text(text, encoding="utf-8")
+
+    def _append_agentix_release_notes(self, pack_path: Path, pack_name: str) -> None:
+        notes_path = pack_path / "ReleaseNotes" / "1_0_0.md"
+        extra = f"""
+#### Agents
+
+##### Sample Analyst
+
+- Initial release of the {pack_name} sample agent.
+
+#### Actions
+
+##### Sample Score
+
+- Initial release of the sample scoring action.
+
+#### Skills
+
+##### Sample Analyst
+
+- Initial release of the sample analyst skill.
+
+#### Collections
+
+##### Sample Worked Alerts
+
+- Initial release of the sample collection handle.
+"""
+        if notes_path.is_file():
+            notes_path.write_text(
+                notes_path.read_text(encoding="utf-8") + extra,
+                encoding="utf-8",
+            )
+
     def create_xsiam_content(self, pack_path: Path, pack_name: str) -> None:
         """Create Cortex Platform content structure.
         

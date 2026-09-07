@@ -89,7 +89,7 @@ from discovery; build it directly by name.
 | validate-all | Validate all packs |
 | format | Format a pack's Python for the content pipeline |
 | build | Build and package packs |
-| upload | Upload a pack to Cortex Platform |
+| upload | Upload a pack to Cortex Platform. Agentix packs force marketplace `platform`, replace the installed copy, and push Collection sibling documents to the Knowledge Center. |
 | version | Show version information for a pack |
 | set-version | Set a specific version for a pack |
 | bump-version | Automatically increment pack version |
@@ -165,6 +165,35 @@ Upgrading an existing pack is one line per pack:
 echo '["Your Name"]' > Packs/MyPack/CONTRIBUTORS.json
 ```
 
+## Agentix packs
+
+`spellbook init` writes Agentix starter items into SamplePack: an agent,
+an action, a script, a skill, and a collection with sibling markdown.
+`create` does not add empty Agentix directories to other packs.
+
+Spellbook does not parse Agentix YAML schemas; demisto-sdk already compiles
+`AgentixAgents/`, `AgentixActions/`, `AgentixSkills/`, and `Collections/`.
+What Spellbook adds on `upload` is the deploy policy the SDK does not apply
+on its own:
+
+- marketplace `platform` (default or `--xsiam` would silently drop Agentix items)
+- `--override-existing` so a second upload does not hang on a prompt
+- a bundled Agentix validation profile on `spellbook validate`
+- Knowledge Center upload for markdown sitting beside a Collection (the SDK dump drops those files)
+
+```bash
+export DEMISTO_BASE_URL="https://api-<tenant>.xdr.<region>.paloaltonetworks.com"
+export DEMISTO_API_KEY="<key>"
+export XSIAM_AUTH_ID="<auth id>"
+
+spellbook upload SamplePack
+spellbook upload SamplePack --dry-run
+```
+
+`--xsiam` on an Agentix pack is an error. Detection packs without those
+folders keep today's flags. `CONTRIBUTORS.json` remains a `validate` house
+rule and is not required for upload.
+
 ## Formatting Python
 
 When `validate` reports that Python content is not formatted, run:
@@ -209,10 +238,15 @@ my-content/
 |   |-- conjure.yml          # Builds packs on version tags
 |   +-- validate.yml        # Validates packs on PRs
 |-- Packs/
-|   +-- SamplePack/         # Starter pack with examples
+|   +-- SamplePack/         # Starter pack with XSIAM examples and Agentix items
 |       |-- pack_metadata.json
 |       |-- README.md
 |       |-- Author_image.png # Author branding (auto-detected by demisto-sdk)
+|       |-- AgentixAgents/
+|       |-- AgentixActions/
+|       |-- AgentixSkills/
+|       |-- Collections/
+|       |-- Scripts/
 |       |-- CorrelationRules/
 |       |-- ParsingRules/
 |       +-- ModelingRules/

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from .pack_template import PackTemplate
+
 
 class InstanceManager:
     """Manages user content instances."""
@@ -447,9 +449,14 @@ This repository contains Cortex Platform content packs built using GoCortex Spel
 ```
 {name}/
 |-- Packs/                  # Content packs
-|   +-- SamplePack/         # Starter pack with examples
+|   +-- SamplePack/         # Starter pack with XSIAM examples and Agentix items
 |       |-- pack_metadata.json
 |       |-- README.md
+|       |-- AgentixAgents/
+|       |-- AgentixActions/
+|       |-- AgentixSkills/
+|       |-- Collections/
+|       |-- Scripts/
 |       |-- CorrelationRules/
 |       |-- ParsingRules/
 |       |-- ModelingRules/
@@ -514,7 +521,7 @@ docker run --rm -v $(pwd):/content \\
   -e DEMISTO_BASE_URL \\
   -e DEMISTO_API_KEY \\
   -e XSIAM_AUTH_ID \\
-  ghcr.io/gocortexio/spellbook:latest upload Packs/SamplePack --platform
+  ghcr.io/gocortexio/spellbook:latest upload SamplePack
 ```
 
 ## References
@@ -527,8 +534,6 @@ docker run --rm -v $(pwd):/content \\
 
     def _create_sample_pack(self, instance_path: Path, author: str = "") -> None:
         """Create a sample pack in the instance."""
-        from .pack_template import PackTemplate
-
         packs_dir = instance_path / "Packs"
 
         template = PackTemplate.__new__(PackTemplate)
@@ -553,6 +558,7 @@ docker run --rm -v $(pwd):/content \\
         )
 
         template.create_xsiam_content(pack_path, "SamplePack")
+        template.create_agentix_content(pack_path, "SamplePack")
 
     def _create_templates_directory(self, instance_path: Path) -> None:
         """Copy built-in templates to the instance templates directory."""
