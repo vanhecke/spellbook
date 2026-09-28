@@ -20,6 +20,7 @@ from .modeling_importer import (
     SCHEMA_FILE_VALID_ATTRIBUTES_TYPE,
     extract_datasets,
 )
+from .knowledge import KNOWLEDGE_CONTENT_TYPES, knowledge_dir
 from .xdm_fields import scan_unmappable_fields
 
 
@@ -284,6 +285,68 @@ def check_modeling_schemas(pack_path: Path) -> list[ValidationIssue]:
     return issues
 
 
+def check_knowledge(pack_path: Path, knowledge_path: Path) -> list[ValidationIssue]:
+    """Check the documents upload will send to the Knowledge Center.
+
+    demisto-sdk has no content type for a knowledge source, so its validate
+    never looks at Knowledge/<Pack>/. The tenant answers every create call
+    with 200 and only then marks a document it cannot index as error, by
+    which time the pack itself has installed.
+
+    A collection is no place for documents either. demisto-sdk reads only
+    Collections/<Id>/<Id>.yml and drops any other file there on upload.
+
+    Module-level rather than a method so `upload` can refuse before the pack
+    installs, not halfway through.
+
+    Args:
+        pack_path: Path to the pack directory.
+        knowledge_path: Path to the pack's knowledge folder.
+
+    Returns:
+        List of validation issues found.
+    """
+    issues: list[ValidationIssue] = []
+    instance_root = knowledge_path.parent.parent
+    target = knowledge_path.relative_to(instance_root)
+
+    def fail(path: Path, root: Path, message: str) -> None:
+        issues.append(ValidationIssue(
+            rule_name="knowledge",
+            severity="error",
+            file_path=str(path.relative_to(root)),
+            message=message,
+        ))
+
+    # Hidden files, such as the .DS_Store Finder leaves behind, are not documents.
+    for path in sorted(pack_path.glob("Collections/*/[!.]*")):
+        if path.name != f"{path.parent.name}.yml":
+            fail(path, pack_path.parent, (
+                f"demisto-sdk uploads only {path.parent.name}.yml from a "
+                f"collection and drops this file - move documents to {target}/"
+            ))
+
+    documents = sorted(knowledge_path.glob("[!.]*"))
+    for path in documents:
+        if path.is_dir():
+            fail(path, instance_root, f"subfolders are not uploaded - move its documents into {target}/")
+        elif path.suffix not in KNOWLEDGE_CONTENT_TYPES:
+            fail(path, instance_root, (
+                f"the Knowledge Center accepts only "
+                f"{', '.join(KNOWLEDGE_CONTENT_TYPES)} files"
+            ))
+        elif path.stat().st_size == 0:
+            fail(path, instance_root, "the file is empty, and the tenant marks an empty document as error")
+
+    if documents and not any(pack_path.glob("AgentixAgents/*/*.yml")):
+        fail(knowledge_path, instance_root, (
+            f"{pack_path.name} has no agent to share these documents with - "
+            f"add one under AgentixAgents/ or remove the folder"
+        ))
+
+    return issues
+
+
 class XSIAMValidator:
     """
     Validates content packs against XSIAM-specific requirements.
@@ -384,6 +447,8 @@ class XSIAMValidator:
         issues.extend(self._check_trigger_placeholders(pack_path))
 
         issues.extend(self._check_prompt_scripts(pack_path))
+
+        issues.extend(check_knowledge(pack_path, knowledge_dir(self.packs_dir, pack_name)))
 
         issues.extend(check_modeling_schemas(pack_path))
 

@@ -50,6 +50,7 @@ CONTENT_TYPE_DIRS = {
     "IncidentFields",
     "Layouts",
     "Classifiers",
+    "AgentixAgents",
 }
 
 XQL_EXTENSION = ".xql"
@@ -62,6 +63,12 @@ XQL_EXTENSION = ".xql"
 # types we currently ship (Playbooks, Triggers, ModelingRules, etc.) use
 # permissive regexes and need no prefix here.
 CONTENT_TYPE_FILENAME_PREFIXES = {"Jobs": "job-"}
+
+# Content types whose yml filename must equal the item id rather than a form
+# of its display name. demisto-sdk finds an Agentix agent only at
+# AgentixAgents/<id>/<id>.yml, so its yml keeps the token-expanded template
+# filename.
+TEMPLATE_FILENAME_CONTENT_TYPES = {"AgentixAgents"}
 
 
 def _format_encoding_error(
@@ -409,7 +416,10 @@ class TemplateRenderer:
                     )
 
             name = data.get("name", template_file.stem)
-            filename = self._generate_filename(name, template_file.suffix)
+            if content_type in TEMPLATE_FILENAME_CONTENT_TYPES:
+                filename = self._replace_tokens(template_file.name, values)
+            else:
+                filename = self._generate_filename(name, template_file.suffix)
             output_content = self._to_yaml(data)
         elif template_file.suffix == ".json":
             output_content = self._replace_tokens(raw_content, values)

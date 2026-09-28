@@ -28,7 +28,7 @@ The demisto-sdk has many features and validation rules. Spellbook wraps it in a 
 - Multi-pack support within a single content instance
 - Import of tenant-authored content via `summon correlation`, `summon datamodel`
   and `summon parsing`
-- Token-based template generation via `summon template` (e.g. `intel_retrohunt`, `parsing_modeling`)
+- Token-based template generation via `summon template` (e.g. `intel_retrohunt`, `parsing_modeling`, `agentix_agent`)
 - Validation using demisto-sdk, plus ruff linting and unit-test execution for Python content, matching the official demisto/content store setup
 - Automated packaging into distributable zip files
 - Direct upload to Cortex Platform instances
@@ -223,6 +223,49 @@ model without a `modelTier`, has a `systemprompt`, has other than one output,
 is not `platform`-only, or breaks the prompt editor's rules for `${variable}`
 names and `responseJsonSchema`.
 
+## Agentix Agents
+
+Start an agent from the built-in template. It binds no actions, skills,
+scripts or collections, only the agent and a system instructions file that
+works unedited:
+
+```bash
+docker run --rm -v $(pwd):/content \
+  ghcr.io/gocortexio/spellbook summon template agentix_agent MyPack \
+  --set AGENT_ID=phishing-triage-agent \
+  --set "AGENT_NAME=Phishing Triage" \
+  --set "AGENT_DESCRIPTION=Triages a reported phishing email and records one verdict."
+```
+
+This writes `AgentixAgents/<AGENT_ID>/<AGENT_ID>.yml` and
+`<AGENT_ID>_systeminstructions.md`. demisto-sdk finds an agent only where the
+folder, the file stem and the `id` agree, so rename all three together. An
+instance created before this template existed can copy
+`spellbook/templates/agentix_agent` into its own `templates/`.
+
+`validate` runs demisto-sdk's Agentix (AG) rules on any pack with an
+`AgentixAgents`, `AgentixActions`, `AgentixSkills` or `Collections` folder.
+demisto-sdk's default configuration runs none of them. The rules selected, and
+why the rest are not, are in `spellbook/assets/agentix_validation_config.toml`.
+
+Upload with `--platform`. demisto-sdk accepts Agentix items on the platform
+marketplace only and drops them without a word otherwise, so `upload` refuses
+to run without it.
+
+demisto-sdk cannot carry Knowledge Center documents. Put them in
+`Knowledge/<Pack>/` at the instance root, as `.md`, `.json`, `.jsonl`, `.csv`
+or `.docx` files. Once the pack has installed, `upload` creates one knowledge
+source per file, shared with every agent in the pack, and waits for the tenant
+to index each one. `validate` and `upload` both check the folder first.
+
+The tenant cannot edit a document, so each upload replaces it: the old source
+is deleted and a new one created. Sharing added by hand in the Knowledge Center
+is lost when that happens. A file removed from the folder stays on the tenant
+until you delete it there.
+
+Do not put documents in `Collections/<Id>/`. demisto-sdk uploads only the
+collection's `.yml`, and `validate` fails on anything else in that folder.
+
 ## Instance Structure
 
 After running `init`, your instance has this structure:
@@ -232,6 +275,7 @@ my-content/
 |-- .github/workflows/      # CI/CD pipelines (if enabled)
 |   |-- conjure.yml          # Builds packs on version tags
 |   +-- validate.yml        # Validates packs on PRs
+|-- Knowledge/              # Knowledge Center documents per pack (created by hand, see Agentix Agents)
 |-- Packs/
 |   +-- SamplePack/         # Starter pack with examples
 |       |-- pack_metadata.json

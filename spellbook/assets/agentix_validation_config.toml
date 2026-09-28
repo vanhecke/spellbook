@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: GoCortexIO
+#
+# demisto-sdk validate configuration for packs carrying Agentix content
+# (AgentixAgents, AgentixActions, AgentixSkills, Collections).
+#
+# The SDK's own default_config.toml selects no AG rule, so without this file
+# validate never looks at an agent, action or skill. Its sdk_validation_config
+# does select them, but it is written for a checkout of demisto/content and
+# pulls in validators that abort outside one.
+#
+# Spellbook validates with -i, which reads only ignorable_errors and
+# [path_based_validations]. Both are copied from demisto-sdk 1.39.5's
+# default_config.toml, and the selection adds every AG rule that runs on a
+# standalone pack. DO104 stays selected: an AI Prompt answers it with a
+# .pack-ignore entry, which the XSIAM validator asks for by name.
+#
+# Not selected:
+#   AG100  forbidden-content list, resolved against the remote content repo
+#   AG102  category, checked against approved_categories.json fetched remotely
+#   AG112  action and skill character budgets
+#   AG116  agent to action/skill dependencies, needs the content graph
+#   AG118  action test file, added in demisto-sdk 1.39.6
+#
+# Refresh alongside the SDK pin in pyproject.toml.
+
+ignorable_errors = [
+  "BA101",
+  "BA105",
+  "BA106",
+  "BA116",
+  "BA118",
+  "DO104",
+  "IN108",
+  "IN130",
+  "PA107",
+  "PA108",
+  "PA111",
+  "PA115",
+  "PA128",
+  "PA130",
+  "RP101"
+]
+
+[path_based_validations]
+select = [
+  "AG101",
+  "AG103",
+  "AG104",
+  "AG105",
+  "AG106",
+  "AG107",
+  "AG108",
+  "AG109",
+  "AG110",
+  "AG111",
+  "AG114",
+  "AG115",
+  "AG117",
+  "BA101",
+  "BA105",
+  "BA106",
+  "BA116",
+  "BA118",
+  "DO104",
+  "IN108",
+  "IN130",
+  "PA107",
+  "PA108",
+  "PA111",
+  "PA115",
+  "PA128",
+  "PA130",
+  "RP101"
+]
+warning = []

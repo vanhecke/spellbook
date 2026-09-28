@@ -1,0 +1,24 @@
+commonfields:
+  id: "%%AGENT_ID%%"
+  version: -1
+display: "%%AGENT_NAME%%"
+name: "%%AGENT_NAME%%"
+description: "%%AGENT_DESCRIPTION%%"
+category: Utilities
+color: "#00CC66"
+visibility: public
+systeminstructions: ""
+conversationstarters: []
+actionids: []
+builtinactions: []
+skillids: []
+collectionids: []
+autoenablenewactions: false
+roles:
+  - Analyst
+sharedwithroles:
+  - Analyst
+marketplaces:
+  - platform
+supportedModules:
+  - agentix
