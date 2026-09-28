@@ -20,11 +20,12 @@ from pathlib import Path
 import click
 
 from spellbook import __version__
-from spellbook.pack_builder import PackBuilder, EXCLUDED_PACKS
+from spellbook.pack_builder import PackBuilder, EXCLUDED_PACKS, has_agentix_content
 from spellbook.pack_template import PackTemplate
 from spellbook.version_manager import VersionManager
 from spellbook.instance import InstanceManager
-from spellbook.xsiam_validator import XSIAMValidator, check_modeling_schemas
+from spellbook.knowledge import knowledge_dir, upload_knowledge
+from spellbook.xsiam_validator import XSIAMValidator, check_knowledge, check_modeling_schemas
 from spellbook.content_importer import CorrelationImporter
 from spellbook.modeling_importer import ModelingRuleImporter
 from spellbook.parsing_importer import ParsingRuleImporter
@@ -1277,6 +1278,30 @@ def upload(pack_path, platform, xsiam, insecure, skip_validation, strict_marketp
         click.echo("")
         sys.exit(1)
 
+    # demisto-sdk supports Agentix items on the platform marketplace only.
+    # Uploaded any other way, the pack installs cleanly without its agents,
+    # actions, skills or collections, and nothing reports the loss.
+    if has_agentix_content(input_file) and not platform:
+        click.echo(f"[ERROR] {pack_name} carries Agentix content, which only the platform marketplace accepts")
+        click.echo("        Without --platform, demisto-sdk silently drops every agent, action, skill and collection.")
+        click.echo(f"        Re-run with: python spellbook.py upload {pack_name} --platform")
+        sys.exit(1)
+
+    # Knowledge Center documents go up only after the pack has installed, so
+    # one the tenant cannot take would leave the pack half delivered. Refuse
+    # here instead, with the same finding validate would give.
+    knowledge_path = knowledge_dir(builder.packs_dir, pack_name)
+    knowledge_issues = check_knowledge(input_file, knowledge_path)
+    if knowledge_issues:
+        click.echo("")
+        for issue in knowledge_issues:
+            click.echo(f"[ERROR] {issue.file_path}: {issue.message}")
+        click.echo("")
+        click.echo(f"[ERROR] {pack_name}: knowledge is not uploadable, refusing to upload")
+        click.echo(f"        Fix the findings, then: python spellbook.py validate {pack_name}")
+        click.echo("")
+        sys.exit(1)
+
     content_root = input_file.parent.parent.resolve()
     git_dir = content_root / ".git"
     git_initialised = False
@@ -1395,6 +1420,13 @@ def upload(pack_path, platform, xsiam, insecure, skip_validation, strict_marketp
                 shutil.rmtree(git_dir)
             except Exception as e:
                 click.echo(f"[WARN] Failed to clean temporary git dir: {e}")
+
+    # demisto-sdk cannot carry Knowledge Center documents, so they follow the
+    # pack through the tenant API once its agents exist to share them with.
+    if not upload_knowledge(input_file, knowledge_path, insecure):
+        click.echo(f"[ERROR] {pack_name} is installed, but its knowledge is incomplete")
+        click.echo("        Fix the failure above and re-run the upload.")
+        sys.exit(1)
 
 
 @cli.command(name="check-init")

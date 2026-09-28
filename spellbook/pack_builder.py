@@ -23,6 +23,17 @@ from .version_manager import VersionManager
 
 EXCLUDED_PACKS = ["SamplePack"]
 
+# Content directories demisto-sdk parses as Agentix items. Every one of them
+# supports the platform marketplace only, and validates only under the AG
+# rules in assets/agentix_validation_config.toml.
+AGENTIX_DIRECTORIES = ["AgentixAgents", "AgentixActions", "AgentixSkills", "Collections"]
+AGENTIX_VALIDATION_CONFIG = Path(__file__).parent / "assets" / "agentix_validation_config.toml"
+
+
+def has_agentix_content(pack_path: Path) -> bool:
+    """Return True if the pack carries any Agentix content directory."""
+    return any((pack_path / directory).is_dir() for directory in AGENTIX_DIRECTORIES)
+
 
 class PackBuilder:
     """Builds and packages Cortex Platform content packs."""
@@ -286,6 +297,11 @@ class PackBuilder:
             "demisto-sdk", "validate",
             "-i", str(pack_path.relative_to(content_root)),
         ]
+
+        # The SDK's default configuration selects no AG rule, so an agent,
+        # action or skill would otherwise pass unchecked.
+        if has_agentix_content(pack_path):
+            cmd.extend(["--config-path", str(AGENTIX_VALIDATION_CONFIG)])
 
         skip_checks = validation_config.get("skip_checks", [])
         for check in skip_checks:
