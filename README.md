@@ -199,6 +199,30 @@ The reference shape, including the hex `trigger_id` and the rule that
 placeholder, but it cannot tell you that a playbook has no Trigger at all,
 because a sub-playbook started by its parent is correct without one.
 
+## AI Prompts
+
+An AI prompt is a script with `isllm: true`: a `userprompt`, one output, and
+no code. It uploads like any other script with `--platform`.
+
+The platform takes the model from `promptConfig.modelTier` (`Flash`, `Thinking`
+or `Pro`) and the system prompt from `promptConfig.systemInstruction`. It drops
+top-level `model` and `systemprompt` on upload, and ignores `promptConfig.model`.
+
+demisto-sdk's DO104 fails every script without a docker image, and a prompt
+runs in no container. Ignore it for that one file in the pack's `.pack-ignore`,
+with `ignore` as the first line under the section:
+
+```ini
+[file:MyPackPrompt.yml]
+ignore=DO104
+```
+
+`validate` asks for that entry by name, and also fails a prompt that carries
+Python-only fields (`script`, a `.py`, `dependson`, `dockerimage`), names a
+model without a `modelTier`, has a `systemprompt`, has other than one output,
+is not `platform`-only, or breaks the prompt editor's rules for `${variable}`
+names and `responseJsonSchema`.
+
 ## Instance Structure
 
 After running `init`, your instance has this structure:

@@ -74,6 +74,26 @@ TRIGGER_PLAYBOOK_PLACEHOLDER = "PLAYBOOK_ID_HERE"
 # schema file is always the stem plus this suffix.
 SCHEMA_FILENAME_SUFFIX = "_schema.json"
 
+# Script keys that configure the container a Python automation runs in. An
+# AI prompt (isllm: true) runs in none, so on a prompt they configure
+# nothing. Spelled as demisto-sdk's strict Script model aliases them.
+PROMPT_CONTAINER_FIELDS = {"dockerimage", "dockerimage45", "alt_dockerimages", "nativeImage", "subtype"}
+
+# The values promptConfig.modelTier takes: demisto-sdk's ModelTier enum
+# (1.39.7 onwards) and the tiers a tenant's /api/v1/agentix/hub-models
+# advertises. The model behind each tier is the tenant's business.
+PROMPT_MODEL_TIERS = {"Flash", "Thinking", "Pro"}
+
+# The structured-output rules the prompt editor states for
+# promptConfig.responseJsonSchema: only these top-level keys, and every
+# "type" drawn from this set.
+PROMPT_SCHEMA_KEYS = {"type", "properties", "required", "additionalProperties"}
+PROMPT_SCHEMA_TYPES = {"array", "boolean", "integer", "null", "number", "object", "string"}
+
+# A ${variable} in a prompt, filled from the argument of the same name. The
+# editor allows only letters, digits and underscores in the name.
+PROMPT_VARIABLE = re.compile(r"\$\{([^}]*)\}")
+
 STRICT_MODEL_SOURCES = {
     "CorrelationRules": (
         "demisto_sdk.commands.content_graph.strict_objects.correlation_rule",
@@ -363,6 +383,8 @@ class XSIAMValidator:
 
         issues.extend(self._check_trigger_placeholders(pack_path))
 
+        issues.extend(self._check_prompt_scripts(pack_path))
+
         issues.extend(check_modeling_schemas(pack_path))
 
         return issues
@@ -420,6 +442,216 @@ class XSIAMValidator:
                         f"nothing else reports that"
                     ),
                 ))
+
+        return issues
+
+    def _check_prompt_scripts(self, pack_path: Path) -> list[ValidationIssue]:
+        """Check that every AI prompt (a script with isllm: true) can run.
+
+        demisto-sdk treats a prompt as a Python script with the code left
+        out. Its parser skips the script body, a sidecar .py and dependson
+        without a word (content_graph/parsers/script.py), so anything
+        Python-only on a prompt validates, uploads, and does nothing.
+
+        The rest are rules nothing in spellbook's chain enforces:
+
+        - DO104 fails every non-JS script without a docker image and says to
+          add one. A prompt needs a per-file .pack-ignore entry instead,
+          which demisto-sdk honours before DO104 runs. It reads only the
+          first key under a [file:] section, hence the strict pattern.
+        - The strict Script model requires a userprompt, and neither
+          demisto-sdk validate nor _check_strict_schemas applies it.
+        - The platform drops top-level model and systemprompt on upload, and
+          stores promptConfig.model without using it. The model comes from
+          promptConfig.modelTier, or the tenant default without one, and the
+          system prompt from promptConfig.systemInstruction.
+        - The platform rejects a prompt without exactly one output: "'Outputs'
+          attribute must have 1 value (52)".
+        - AG101 requires marketplaces of exactly [platform], inherited from
+          pack_metadata.json when the item sets none. The default config
+          does not select AG101.
+        - The prompt editor limits ${variable} names and responseJsonSchema.
+
+        Model ids and maxOutputTokens ranges differ per tenant
+        (/api/v1/agentix/hub-models), so they are not checked.
+
+        Args:
+            pack_path: Path to the pack directory.
+
+        Returns:
+            List of validation issues found.
+        """
+        scripts_dir = pack_path / "Scripts"
+        if not scripts_dir.is_dir():
+            return []
+
+        try:
+            pack_ignore = (pack_path / ".pack-ignore").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pack_ignore = ""
+        try:
+            metadata = json.loads((pack_path / "pack_metadata.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            metadata = {}
+        pack_marketplaces = metadata.get("marketplaces") if isinstance(metadata, dict) else None
+
+        issues: list[ValidationIssue] = []
+
+        def flag(path: Path, message: str, severity: str = "error") -> None:
+            issues.append(ValidationIssue(
+                rule_name="ai_prompt",
+                severity=severity,
+                file_path=str(path.relative_to(pack_path.parent)),
+                message=message,
+            ))
+
+        def bad_schema_types(node, where: str):
+            # Nested schemas sit under properties and items.
+            if not isinstance(node, dict):
+                return
+            if "type" in node:
+                declared = node["type"]
+                for value in declared if isinstance(declared, list) else [declared]:
+                    if value is None:
+                        yield f"{where} has a bare null type, which YAML reads as no value - quote it as 'null'"
+                    elif not isinstance(value, str) or value not in PROMPT_SCHEMA_TYPES:
+                        yield f"{where} has type {value!r}"
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                for key, child in properties.items():
+                    yield from bad_schema_types(child, f"{where}.{key}")
+            items = node.get("items")
+            for child in items if isinstance(items, list) else [items]:
+                yield from bad_schema_types(child, f"{where}.items")
+
+        for path in sorted(scripts_dir.glob("*/*.yml")):
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                # Shape is demisto-sdk's business; only prompts here.
+                continue
+
+            if not isinstance(data, dict) or not data.get("isllm"):
+                continue
+
+            ignore_entry = re.compile(
+                rf"^\[(?:file:{re.escape(path.name)}|pack)\][ \t]*\n"
+                rf"[ \t]*ignore[ \t]*=[^\n]*\bDO104\b",
+                re.MULTILINE,
+            )
+            if not ignore_entry.search(pack_ignore):
+                flag(path, (
+                    f"DO104 is not ignored for this prompt - demisto-sdk "
+                    f"fails any script without a docker image, and a prompt "
+                    f"runs in no container. Add '[file:{path.name}]' followed by "
+                    f"'ignore=DO104' on the next line to "
+                    f"{pack_path.name}/.pack-ignore"
+                ))
+
+            if data.get("script"):
+                flag(path, (
+                    "has a script body - demisto-sdk drops it from a prompt, "
+                    "so it never reaches the tenant"
+                ))
+            for sidecar in sorted(path.parent.glob("*.py")):
+                flag(sidecar, (
+                    "sits beside an AI prompt - demisto-sdk does not unify "
+                    "prompts, so this code is never uploaded"
+                ))
+            if data.get("dependson"):
+                flag(path, (
+                    "has dependson - demisto-sdk ignores it on a prompt, "
+                    "which runs no commands"
+                ))
+            container = sorted(PROMPT_CONTAINER_FIELDS & set(data))
+            if container:
+                flag(path, (
+                    f"sets {', '.join(container)} - a prompt runs in no "
+                    f"container, so these configure nothing"
+                ))
+
+            config = data.get("promptConfig")
+            if not isinstance(config, dict):
+                config = {}
+
+            if not data.get("userprompt"):
+                flag(path, "has no userprompt - every prompt needs one")
+            if (data.get("model") or config.get("model")) and not config.get("modelTier"):
+                flag(path, (
+                    f"names a model but no promptConfig.modelTier - the "
+                    f"platform picks the model from the tier alone, so this "
+                    f"prompt runs on the tenant default. Set modelTier to one "
+                    f"of {', '.join(sorted(PROMPT_MODEL_TIERS))}"
+                ))
+            if data.get("systemprompt"):
+                flag(path, (
+                    "has a systemprompt - the platform drops it on upload, so "
+                    "the model never sees it. Move it to "
+                    "promptConfig.systemInstruction"
+                ))
+            if "modelTier" in config and str(config["modelTier"]) not in PROMPT_MODEL_TIERS:
+                flag(path, (
+                    f"promptConfig.modelTier {config['modelTier']!r} is not "
+                    f"one of {', '.join(sorted(PROMPT_MODEL_TIERS))}"
+                ))
+            outputs = data.get("outputs") or []
+            if len(outputs) != 1:
+                flag(path, (
+                    f"has {len(outputs)} outputs - the platform rejects a "
+                    f"prompt without exactly one: 'Outputs' attribute must "
+                    f"have 1 value (52)"
+                ))
+            marketplaces = data.get("marketplaces") or pack_marketplaces
+            if marketplaces != ["platform"]:
+                flag(path, (
+                    f"resolves to marketplaces {marketplaces} - a prompt must "
+                    f"be [platform] only (AG101), set on the item or in "
+                    f"pack_metadata.json"
+                ))
+            if isinstance(data.get("fewshots"), list):
+                flag(path, (
+                    "fewshots is a list - on a script it is a single string; "
+                    "the list form belongs to AgentixActions"
+                ))
+
+            declared = {arg.get("name") for arg in data.get("args") or [] if isinstance(arg, dict)}
+            userprompt = data.get("userprompt")
+            if not isinstance(userprompt, str):
+                userprompt = ""
+            for name in sorted(set(PROMPT_VARIABLE.findall(userprompt))):
+                if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                    flag(path, (
+                        f"userprompt variable ${{{name}}} - names may only "
+                        f"use letters, digits and underscores"
+                    ))
+                elif name not in declared:
+                    flag(path, (
+                        f"userprompt uses ${{{name}}} but no argument has "
+                        f"that name to fill it"
+                    ), severity="warning")
+
+            if "responseJsonSchema" in config:
+                schema = config["responseJsonSchema"]
+                if not isinstance(schema, dict):
+                    problems = ["it is not an object"]
+                else:
+                    problems = [
+                        f"top-level key {key!r} is not allowed"
+                        for key in sorted(set(schema) - PROMPT_SCHEMA_KEYS)
+                    ]
+                    if schema.get("type") != "object":
+                        problems.append(f"top-level type is {schema.get('type')!r}, not 'object'")
+                    properties = schema.get("properties")
+                    if isinstance(properties, dict):
+                        for key, child in properties.items():
+                            problems.extend(bad_schema_types(child, key))
+                if problems:
+                    flag(path, (
+                        f"promptConfig.responseJsonSchema breaks the "
+                        f"structured-output rules - {'; '.join(problems)}. "
+                        f"Types must be one of "
+                        f"{', '.join(sorted(PROMPT_SCHEMA_TYPES))}"
+                    ))
 
         return issues
 
