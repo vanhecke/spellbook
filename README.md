@@ -71,6 +71,14 @@ docker run --rm \
   ghcr.io/gocortexio/spellbook build --all
 ```
 
+`:latest` does not say which build you got. `spellbook --version` reports the
+commit an image was built from, so it can confirm what you are actually
+running: an image published by CI prints `1.25.9 (<commit>)`, while one built
+locally with `docker build` prints `1.25.9 (local build, unstamped)`. Images
+published before 1.24.0 predate the build stamp and report a bare version with
+no identifier, so match the image ID to tell those apart. The stamp cannot
+distinguish two local builds from each other: every local build is unstamped.
+
 If no packs are discovered, `build --all` and `validate-all` exit with a
 grepable `[ERROR]` rather than reporting success, so a missing volume mount in
 CI cannot produce a green pipeline and an empty release. SamplePack is excluded
@@ -93,6 +101,7 @@ from discovery; build it directly by name.
 | version | Show version information for a pack |
 | set-version | Set a specific version for a pack |
 | bump-version | Automatically increment pack version |
+| sync-defaults | Carry configured identity values into existing packs |
 | summon correlation | Import correlation rules from platform JSON export |
 | summon datamodel | Import a data model rule from XIF text |
 | summon parsing | Import a parsing rule from XIF text |
@@ -115,7 +124,7 @@ docker run --rm -v $(pwd):/content \
 ```
 
 Import content authored in a Cortex Platform tenant. Every importer reads from
-stdin, so pipe a file in or paste and press Ctrl+D:
+stdin, so pipe a file in (note `-i`) or paste interactively:
 
 ```bash
 # correlation rules from a JSON export
@@ -136,8 +145,61 @@ cat rule.xif | docker run -i --rm -v $(pwd):/content \
 override the name or `--minimal-schema` to emit only `_raw_log` instead of
 inferring columns.
 
+Columns are inferred from the fields the rule reads, so `_raw_log` is declared
+only when the rule actually reads it. Most types are written as `string` and the
+command prints a `[WARN]` naming the columns whose type most likely needs
+correcting; review them before uploading.
+
+To model several datasets, add several `[MODEL: dataset=...]` blocks to one
+`.xif` rather than giving each dataset its own directory. Two modelling rule
+directories in a pack declaring the same `fromversion` cannot both activate on
+the tenant: one wins and the rest install and model nothing. `validate` reports
+that as an error and `upload` refuses it; `--fromversion` sets a distinct
+version where the version-variant layout is genuinely wanted.
+
 `summon parsing` writes the two-file parsing rule package (`.yml`, `.xif`) into
 `ParsingRules/`, named after the target dataset. Use `--name` to override it.
+
+Every importer reads stdin, so `-i` is required - it is what connects your
+terminal to the container. Without it Docker supplies an empty stdin, the
+command reads end-of-file immediately and exits before you can paste anything.
+To paste rather than pipe, use `-it` and drop the pipe, then end the input with
+Ctrl+D (or Ctrl+Z followed by Enter on Windows, where Ctrl+D does nothing).
+
+### Uplifting an existing repo
+
+A pack created before a value was set in `spellbook.yaml` carries the empty
+value it was scaffolded with. `sync-defaults` carries the configured values into
+existing packs - `url`, `email`, `githubUser` and `CONTRIBUTORS.json`:
+
+```bash
+# report what would change, write nothing
+docker run --rm -v $(pwd):/content \
+  ghcr.io/gocortexio/spellbook sync-defaults --all
+
+# make the changes
+docker run --rm -v $(pwd):/content \
+  ghcr.io/gocortexio/spellbook sync-defaults --all --apply
+```
+
+Only EMPTY fields are filled. A pack holding a different value keeps it and the
+difference is reported, so a deliberate per-pack choice is never discarded. It
+writes nothing without `--apply`.
+
+`categories` is not synced: it is a per-pack decision, and `validate` already
+errors on an empty one rather than guessing.
+
+For findings that are not identity values - a missing `isFetchEvents`, a
+description without a full stop - `demisto-sdk validate --fix` handles a good
+share. Note it rewrites the whole YAML rather than patching it, so check the
+diff on a file carrying comments. Clear any `supported_modules_invalid` finding
+first: on an integration still declaring licence codes such as `C1`, the fix
+gives every fetch parameter an empty `supportedModules`.
+
+`check-init` reports whether the upload credentials are visible, so it needs the
+same `-e DEMISTO_BASE_URL -e DEMISTO_API_KEY -e XSIAM_AUTH_ID` passthrough that
+`upload` does. Without them it reports the credentials as unset even when your
+shell has them set.
 
 Both rule types are file sets whose stems must agree, because demisto-sdk
 enumerates the `.yml` and finds the rest by stem. Creating them by hand is the
@@ -145,11 +207,23 @@ one way to get this wrong: a lone `.xif` is invisible, so the pack validates,
 uploads and installs while the rule never deploys. `validate` now fails on an
 incomplete set.
 
+Every Python or PowerShell script and integration must name the container it
+runs in - `dockerimage` at the root of a script, under `script:` in an
+integration - and `validate` and `build` fail without one. A prompt-backed
+script (`isllm: true`) runs no code, so it takes no image and is not asked for
+one.
+
 ## Pack Attribution
 
 Every pack must carry `CONTRIBUTORS.json` at its root, and `validate` fails
-without it. `create` writes one seeded with the pack author, so a new pack
-passes from the start.
+without it, so `create` always writes one and a new pack passes from the start.
+
+It is seeded with a fixed Spellbook maintainer entry, `["Simon Sigre
+(packs@gocortex.io)"]`, NOT with `--author`. The two are different facts:
+`--author` names the organisation publishing the pack and belongs in
+`pack_metadata.json`, while this names the person accountable for the content.
+Replace it with your own before publishing - the value is a default, not a
+claim about who wrote your pack.
 
 The format is demisto-sdk's: a flat JSON array of names, nothing else.
 
@@ -191,9 +265,8 @@ A Trigger is the only content-level thing that binds an issue to a playbook,
 and its `alerts_filter` names which alerts should start it. That is a
 detection-design decision the template has no way to know, so it is authored
 by hand once you know which correlation rules the playbook should respond to.
-The reference shape, including the hex `trigger_id` and the rule that
-`playbook_id` must equal the playbook's `id` byte for byte, is in
-`PRIVATE_DOCS/XSIAM_CONTENT_GUIDELINES.md` under Triggers.
+Give it a hex `trigger_id`, and make its `playbook_id` equal the playbook's
+`id` byte for byte.
 
 `validate` will not let you ship one carrying the old `PLAYBOOK_ID_HERE`
 placeholder, but it cannot tell you that a playbook has no Trigger at all,
@@ -208,16 +281,17 @@ The platform takes the model from `promptConfig.modelTier` (`Flash`, `Thinking`
 or `Pro`) and the system prompt from `promptConfig.systemInstruction`. It drops
 top-level `model` and `systemprompt` on upload, and ignores `promptConfig.model`.
 
-demisto-sdk's DO104 fails every script without a docker image, and a prompt
-runs in no container. Ignore it for that one file in the pack's `.pack-ignore`,
-with `ignore` as the first line under the section:
+Spellbook checks DO104 (every script needs a docker image) itself, and
+exempts prompts, which run in no container. demisto-sdk run on its own, for
+example in demisto/content CI, does not, so keep a `.pack-ignore` entry for
+the prompt file, with `ignore` as the first line under the section:
 
 ```ini
 [file:MyPackPrompt.yml]
 ignore=DO104
 ```
 
-`validate` asks for that entry by name, and also fails a prompt that carries
+`validate` warns when that entry is missing, and fails a prompt that carries
 Python-only fields (`script`, a `.py`, `dependson`, `dockerimage`), names a
 model without a `modelTier`, has a `systemprompt`, has other than one output,
 is not `platform`-only, or breaks the prompt editor's rules for `${variable}`
@@ -244,9 +318,21 @@ instance created before this template existed can copy
 `spellbook/templates/agentix_agent` into its own `templates/`.
 
 `validate` runs demisto-sdk's Agentix (AG) rules on any pack with an
-`AgentixAgents`, `AgentixActions`, `AgentixSkills` or `Collections` folder.
+`AgentixAgents`, `AgentixActions`, `AgentixSkills` or `Knowledge` folder.
 demisto-sdk's default configuration runs none of them. The rules selected, and
 why the rest are not, are in `spellbook/assets/agentix_validation_config.toml`.
+That includes AG118: every action needs an `<ActionId>_test.yml` beside it.
+`validate` also checks agents, actions, skills and knowledge collections
+against demisto-sdk's strict models, and reports any mismatch as a warning.
+
+demisto-sdk 1.39.13 renamed the pack's knowledge collections. The folder
+`Collections/<Id>/<Id>.yml` became `Knowledge/<Id>/<Id>.yml`, and the agent
+field `collectionids` became `knowledgeids`. A pack still on the old names
+builds without complaint, but loses its collections and the agent's binding to
+them. So `validate` fails on either old name, and warns on a `display` field on
+an agent, which the agent schema never had. 1.39.13 also accepts the XSIAM 4.0
+fields: `mcps` (a list of `server_url`) on an agent, and `islongrunning` /
+`longrunningtimeoutseconds` on an action.
 
 Upload with `--platform`. demisto-sdk accepts Agentix items on the platform
 marketplace only and drops them without a word otherwise, so `upload` refuses
@@ -263,8 +349,11 @@ is deleted and a new one created. Sharing added by hand in the Knowledge Center
 is lost when that happens. A file removed from the folder stays on the tenant
 until you delete it there.
 
-Do not put documents in `Collections/<Id>/`. demisto-sdk uploads only the
-collection's `.yml`, and `validate` fails on anything else in that folder.
+Two folders share the name, so don't mix them up. Documents go in the
+instance-level `Knowledge/<Pack>/`. The pack-level `Packs/<Pack>/Knowledge/<Id>/`
+holds a knowledge collection's `.yml`, its name and description, and nothing
+else. demisto-sdk uploads only that `.yml`, and `validate` fails on anything
+else in the folder.
 
 ## Instance Structure
 
