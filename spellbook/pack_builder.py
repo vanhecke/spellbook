@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import time
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -30,14 +31,34 @@ EXCLUDED_PACKS = ["SamplePack"]
 
 # Content directories demisto-sdk parses as Agentix items. Every one of them
 # supports the platform marketplace only, and validates only under the AG
-# rules in assets/agentix_validation_config.toml.
-AGENTIX_DIRECTORIES = ["AgentixAgents", "AgentixActions", "AgentixSkills", "Collections"]
+# rules in assets/agentix_validation_config.toml. demisto-sdk 1.39.13 renamed
+# Collections/ to Knowledge/. Collections/ stays listed so a pack still on the
+# old layout counts as Agentix content: it is then held to the platform
+# marketplace, and validate reports the rename (agentix_sdk_rename).
+AGENTIX_DIRECTORIES = ["AgentixAgents", "AgentixActions", "AgentixSkills", "Knowledge", "Collections"]
 AGENTIX_VALIDATION_CONFIG = Path(__file__).parent / "assets" / "agentix_validation_config.toml"
 
 
 def has_agentix_content(pack_path: Path) -> bool:
     """Return True if the pack carries any Agentix content directory."""
     return any((pack_path / directory).is_dir() for directory in AGENTIX_DIRECTORIES)
+
+
+def agentix_validations() -> list[str]:
+    """Return the AG codes assets/agentix_validation_config.toml selects.
+
+    validate passes its codes with -sv, and -sv REPLACES a config's select
+    rather than extending it (see SDK_DEFAULT_VALIDATIONS below). So the
+    config's own select list never runs. These codes have to be added to the
+    -sv list, or every agent, action and skill passes unchecked. The config is
+    still passed with --config-path for its ignorable_errors.
+    """
+    with AGENTIX_VALIDATION_CONFIG.open("rb") as handle:
+        config = tomllib.load(handle)
+    return [
+        code for code in config["path_based_validations"]["select"]
+        if code.startswith("AG")
+    ]
 
 
 # demisto-sdk's default_config.toml selects only these 15 codes for a path-based
@@ -835,15 +856,22 @@ class PackBuilder:
         # cwd). An absolute -i path makes demisto-sdk resolve its internal
         # CONTENT_PATH to an empty string, which later crashes validators
         # with "is not in the subpath of ''".
+        # The SDK's default configuration selects no AG rule, so an agent,
+        # action or skill would otherwise pass unchecked. The AG codes join the
+        # -sv list (a config's select is ignored once -sv is given); the config
+        # still supplies ignorable_errors.
+        selected = list(SDK_SELECTED_VALIDATIONS)
+        agentix = has_agentix_content(pack_path)
+        if agentix:
+            selected += [code for code in agentix_validations() if code not in selected]
+
         cmd = [
             "demisto-sdk", "validate",
             "-i", str(pack_path.relative_to(content_root)),
-            "-sv", ",".join(SDK_SELECTED_VALIDATIONS),
+            "-sv", ",".join(selected),
         ]
 
-        # The SDK's default configuration selects no AG rule, so an agent,
-        # action or skill would otherwise pass unchecked.
-        if has_agentix_content(pack_path):
+        if agentix:
             cmd.extend(["--config-path", str(AGENTIX_VALIDATION_CONFIG)])
 
         skip_checks = validation_config.get("skip_checks", [])

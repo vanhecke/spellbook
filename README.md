@@ -281,16 +281,17 @@ The platform takes the model from `promptConfig.modelTier` (`Flash`, `Thinking`
 or `Pro`) and the system prompt from `promptConfig.systemInstruction`. It drops
 top-level `model` and `systemprompt` on upload, and ignores `promptConfig.model`.
 
-demisto-sdk's DO104 fails every script without a docker image, and a prompt
-runs in no container. Ignore it for that one file in the pack's `.pack-ignore`,
-with `ignore` as the first line under the section:
+Spellbook checks DO104 (every script needs a docker image) itself, and
+exempts prompts, which run in no container. demisto-sdk run on its own, for
+example in demisto/content CI, does not, so keep a `.pack-ignore` entry for
+the prompt file, with `ignore` as the first line under the section:
 
 ```ini
 [file:MyPackPrompt.yml]
 ignore=DO104
 ```
 
-`validate` asks for that entry by name, and also fails a prompt that carries
+`validate` warns when that entry is missing, and fails a prompt that carries
 Python-only fields (`script`, a `.py`, `dependson`, `dockerimage`), names a
 model without a `modelTier`, has a `systemprompt`, has other than one output,
 is not `platform`-only, or breaks the prompt editor's rules for `${variable}`
@@ -317,9 +318,21 @@ instance created before this template existed can copy
 `spellbook/templates/agentix_agent` into its own `templates/`.
 
 `validate` runs demisto-sdk's Agentix (AG) rules on any pack with an
-`AgentixAgents`, `AgentixActions`, `AgentixSkills` or `Collections` folder.
+`AgentixAgents`, `AgentixActions`, `AgentixSkills` or `Knowledge` folder.
 demisto-sdk's default configuration runs none of them. The rules selected, and
 why the rest are not, are in `spellbook/assets/agentix_validation_config.toml`.
+That includes AG118: every action needs an `<ActionId>_test.yml` beside it.
+`validate` also checks agents, actions, skills and knowledge collections
+against demisto-sdk's strict models, and reports any mismatch as a warning.
+
+demisto-sdk 1.39.13 renamed the pack's knowledge collections. The folder
+`Collections/<Id>/<Id>.yml` became `Knowledge/<Id>/<Id>.yml`, and the agent
+field `collectionids` became `knowledgeids`. A pack still on the old names
+builds without complaint, but loses its collections and the agent's binding to
+them. So `validate` fails on either old name, and warns on a `display` field on
+an agent, which the agent schema never had. 1.39.13 also accepts the XSIAM 4.0
+fields: `mcps` (a list of `server_url`) on an agent, and `islongrunning` /
+`longrunningtimeoutseconds` on an action.
 
 Upload with `--platform`. demisto-sdk accepts Agentix items on the platform
 marketplace only and drops them without a word otherwise, so `upload` refuses
@@ -336,8 +349,11 @@ is deleted and a new one created. Sharing added by hand in the Knowledge Center
 is lost when that happens. A file removed from the folder stays on the tenant
 until you delete it there.
 
-Do not put documents in `Collections/<Id>/`. demisto-sdk uploads only the
-collection's `.yml`, and `validate` fails on anything else in that folder.
+Two folders share the name, so don't mix them up. Documents go in the
+instance-level `Knowledge/<Pack>/`. The pack-level `Packs/<Pack>/Knowledge/<Id>/`
+holds a knowledge collection's `.yml`, its name and description, and nothing
+else. demisto-sdk uploads only that `.yml`, and `validate` fails on anything
+else in the folder.
 
 ## Instance Structure
 

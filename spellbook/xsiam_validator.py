@@ -235,7 +235,37 @@ PACK_DESC_DEPRECATED = (
 # items of any kind, so these are left out when deciding whether it has any.
 RN_NON_CONTENT_DIRS = {"ReleaseNotes", "doc_files", "doc_imgs", "test_data"}
 
+# demisto-sdk 1.39.13 renamed the Collection content type to Knowledge: the
+# folder Collections/ became Knowledge/ and the agent field collectionids
+# became knowledgeids. A pack still written the old way builds without a word,
+# but the build leaves its collections out and sends collectionids to the
+# tenant unrenamed, so the agent loses its knowledge binding. Checked by
+# _check_agentix_sdk_renames. The strict models report the same fields as
+# extra; those findings are left to the rename check (one defect, one finding).
+LEGACY_KNOWLEDGE_DIR = "Collections"
+AGENT_FIELDS_REPORTED_BY_RENAME_CHECK = {"collectionids", "display"}
+
 STRICT_MODEL_SOURCES = {
+    "AgentixAgents": (
+        "demisto_sdk.commands.content_graph.strict_objects.agentix_agent",
+        "AgentixAgent",
+        True,
+    ),
+    "AgentixActions": (
+        "demisto_sdk.commands.content_graph.strict_objects.agentix_action",
+        "AgentixAction",
+        True,
+    ),
+    "AgentixSkills": (
+        "demisto_sdk.commands.content_graph.strict_objects.agentix_skill",
+        "StrictAgentixSkill",
+        True,
+    ),
+    "Knowledge": (
+        "demisto_sdk.commands.content_graph.strict_objects.knowledge",
+        "StrictKnowledge",
+        True,
+    ),
     "CorrelationRules": (
         "demisto_sdk.commands.content_graph.strict_objects.correlation_rule",
         "StrictCorrelationRule",
@@ -607,8 +637,11 @@ def check_knowledge(pack_path: Path, knowledge_path: Path) -> list[ValidationIss
     with 200 and only then marks a document it cannot index as error, by
     which time the pack itself has installed.
 
-    A collection is no place for documents either. demisto-sdk reads only
-    Collections/<Id>/<Id>.yml and drops any other file there on upload.
+    A knowledge collection is no place for documents either. demisto-sdk reads
+    only Knowledge/<Id>/<Id>.yml (Collections/<Id>/<Id>.yml before 1.39.13)
+    and drops any other file there on upload. Pack-level Knowledge/<Id>/ is
+    not the instance-level Knowledge/<Pack>/ this function checks the
+    documents of: the first holds collection handles, the second documents.
 
     Module-level rather than a method so `upload` can refuse before the pack
     installs, not halfway through.
@@ -633,7 +666,12 @@ def check_knowledge(pack_path: Path, knowledge_path: Path) -> list[ValidationIss
         ))
 
     # Hidden files, such as the .DS_Store Finder leaves behind, are not documents.
-    for path in sorted(pack_path.glob("Collections/*/[!.]*")):
+    collection_files = sorted(
+        path
+        for folder in ("Knowledge", LEGACY_KNOWLEDGE_DIR)
+        for path in pack_path.glob(f"{folder}/*/[!.]*")
+    )
+    for path in collection_files:
         if path.name != f"{path.parent.name}.yml":
             fail(path, pack_path.parent, (
                 f"demisto-sdk uploads only {path.parent.name}.yml from a "
@@ -783,6 +821,8 @@ class XSIAMValidator:
         issues.extend(self._check_correlation_drilldown(pack_path))
 
         issues.extend(self._check_prompt_scripts(pack_path))
+
+        issues.extend(self._check_agentix_sdk_renames(pack_path))
 
         issues.extend(check_knowledge(pack_path, knowledge_dir(self.packs_dir, pack_name)))
 
@@ -1167,6 +1207,88 @@ class XSIAMValidator:
 
         return issues
 
+    def _check_agentix_sdk_renames(self, pack_path: Path) -> list[ValidationIssue]:
+        """Check agent content for names demisto-sdk 1.39.13 no longer reads.
+
+        - Collections/ is now Knowledge/. The 1.39.13 build leaves any
+          collection under Collections/ out of the pack and says nothing.
+        - An agent's collectionids is now knowledgeids. The unifier renames
+          only knowledgeids to the server field systemknowledgecollectionids,
+          so collectionids reaches the tenant under a key it ignores.
+        - An agent has no display field. Its schema never had one and the
+          tenant stores only name, so this is a warning: harmless on the
+          tenant, but demisto/content's ST110 rejects it.
+
+        Args:
+            pack_path: Path to the pack directory.
+
+        Returns:
+            List of validation issues found.
+        """
+        issues: list[ValidationIssue] = []
+
+        legacy_dir = pack_path / LEGACY_KNOWLEDGE_DIR
+        if legacy_dir.is_dir():
+            issues.append(ValidationIssue(
+                rule_name="agentix_sdk_rename",
+                severity="error",
+                file_path=str(legacy_dir.relative_to(pack_path.parent)),
+                message=(
+                    "Collections/ was renamed Knowledge/ in demisto-sdk 1.39.13, "
+                    "which no longer reads Collections/"
+                ),
+                consequence=(
+                    "the build leaves every collection in it out of the pack, "
+                    "and nothing reports it"
+                ),
+                remediation=(
+                    f"git mv {pack_path.name}/{LEGACY_KNOWLEDGE_DIR} "
+                    f"{pack_path.name}/Knowledge"
+                ),
+            ))
+
+        for agent_path in sorted(pack_path.glob("AgentixAgents/*/*.yml")):
+            if agent_path.stem != agent_path.parent.name:
+                continue  # <AgentId>_test.yml, not the agent
+            try:
+                data = yaml.safe_load(agent_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                continue  # demisto-sdk reports a file it cannot read
+            if not isinstance(data, dict):
+                continue
+            relative_path = str(agent_path.relative_to(pack_path.parent))
+
+            if "collectionids" in data:
+                issues.append(ValidationIssue(
+                    rule_name="agentix_sdk_rename",
+                    severity="error",
+                    file_path=relative_path,
+                    message=(
+                        "collectionids was renamed knowledgeids in demisto-sdk "
+                        "1.39.13"
+                    ),
+                    consequence=(
+                        "it reaches the tenant unrenamed, under a key the "
+                        "tenant ignores, so the agent loses its knowledge "
+                        "binding without a word"
+                    ),
+                    remediation="rename the key to knowledgeids",
+                ))
+            if "display" in data:
+                issues.append(ValidationIssue(
+                    rule_name="agentix_sdk_rename",
+                    severity="warning",
+                    file_path=relative_path,
+                    message="an agent has no display field",
+                    consequence=(
+                        "the tenant ignores it and stores only name, but "
+                        "demisto/content's ST110 rejects it"
+                    ),
+                    remediation="remove display; name is what the tenant shows",
+                ))
+
+        return issues
+
     def _check_prompt_scripts(self, pack_path: Path) -> list[ValidationIssue]:
         """Check that every AI prompt (a script with isllm: true) can run.
 
@@ -1178,9 +1300,12 @@ class XSIAMValidator:
         The rest are rules nothing in spellbook's chain enforces:
 
         - DO104 fails every non-JS script without a docker image and says to
-          add one. A prompt needs a per-file .pack-ignore entry instead,
-          which demisto-sdk honours before DO104 runs. It reads only the
-          first key under a [file:] section, hence the strict pattern.
+          add one. Spellbook no longer runs the SDK's DO104 (check_docker_images
+          stands in for it and exempts prompts), so inside spellbook a prompt
+          needs nothing. demisto-sdk run on its own, demisto/content CI
+          included, still needs a per-file .pack-ignore entry, which it honours
+          before DO104 runs, so a missing entry is a warning. The SDK reads
+          only the first key under a [file:] section, hence the strict pattern.
         - The strict Script model requires a userprompt, and neither
           demisto-sdk validate nor _check_strict_schemas applies it.
         - The platform drops top-level model and systemprompt on upload, and
@@ -1263,12 +1388,13 @@ class XSIAMValidator:
             )
             if not ignore_entry.search(pack_ignore):
                 flag(path, (
-                    f"DO104 is not ignored for this prompt - demisto-sdk "
-                    f"fails any script without a docker image, and a prompt "
-                    f"runs in no container. Add '[file:{path.name}]' followed by "
-                    f"'ignore=DO104' on the next line to "
-                    f"{pack_path.name}/.pack-ignore"
-                ))
+                    f"DO104 is not ignored for this prompt - spellbook exempts "
+                    f"prompts, but demisto-sdk run on its own (demisto/content "
+                    f"CI included) fails any script without a docker image, "
+                    f"and a prompt runs in no container. Add "
+                    f"'[file:{path.name}]' followed by 'ignore=DO104' on the "
+                    f"next line to {pack_path.name}/.pack-ignore"
+                ), severity="warning")
 
             if data.get("script"):
                 flag(path, (
@@ -1688,6 +1814,9 @@ class XSIAMValidator:
                 if nested
                 else sorted(content_dir.glob("*.yml"))
             )
+            # <Id>_test.yml beside an action or agent is a test definition,
+            # not the content item, and has its own model.
+            paths = [path for path in paths if not path.name.endswith("_test.yml")]
             if paths:
                 candidates[content_type] = paths
 
@@ -1723,6 +1852,10 @@ class XSIAMValidator:
                     for error in errors():
                         field = ".".join(str(part) for part in error.get("loc", ()))
                         if self._is_known_model_gap(field, error, data):
+                            continue
+                        if (content_type == "AgentixAgents"
+                                and error.get("type") == "value_error.extra"
+                                and field in AGENT_FIELDS_REPORTED_BY_RENAME_CHECK):
                             continue
                         issues.append(ValidationIssue(
                             rule_name="strict_schema_mismatch",
